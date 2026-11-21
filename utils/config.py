@@ -13,7 +13,7 @@ def _int(raw: str) -> int:
     return int(raw) if raw.strip().isdigit() else 0
 
 
-BOT_NAME = "XEON"
+BOT_NAME = "ATOM"
 DEFAULT_PREFIX = os.getenv("BOT_PREFIX", "&")
 
 OWNER_IDS = _ids(os.getenv("OWNER_IDS", ""))
