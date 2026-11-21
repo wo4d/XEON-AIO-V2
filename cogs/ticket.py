@@ -45,7 +45,7 @@ DATA_FILE = os.path.join(DATA_DIR, "tickets.json")
 
 COMMON_PREFIXES = ("&", "!", ".", "?", ";", ",", "+", "-", ">", "$")
 
-OPEN_CATEGORY_NAME   = "Xeon Tickets"
+OPEN_CATEGORY_NAME   = "ATOM Tickets"
 CLOSED_CATEGORY_NAME = "Closed Tickets"
 
 if not os.path.exists(DATA_DIR):
