@@ -81,8 +81,8 @@ class XEON(commands.Bot):
         self.INVITE_URL = INVITE_URL
         self.OWNER_IDS = OWNER_IDS
         self.status_list = [
-            f"Powered by XEON development | {DEFAULT_PREFIX}help",
-            "XEON - Control Everything",
+            f"Atom Nucleus Atomic charge  | {DEFAULT_PREFIX}help",
+            "⚛ Atom is everywhere You cannot bypass me.",
         ]
         self.status_index = 0
 
