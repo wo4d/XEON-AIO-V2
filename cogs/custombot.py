@@ -24,7 +24,7 @@ _KEY_MAP = {
 }
 
 ACCENT_COLOR = discord.Colour(0x000000)
-BOT_NAME = "XEON"
+BOT_NAME = "ATOM"
 
 DB_DIR = Path("db")
 DB_PATH = DB_DIR / "custombot.db"
