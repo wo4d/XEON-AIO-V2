@@ -17,7 +17,7 @@ ACCENT_COLOR = 0x000000
 
 DB_PATH = "db/anti.db"
 
-SECURITY_ROLE_NAME = "Unbypassable Security [X+]"
+SECURITY_ROLE_NAME = "Atomic shield"
 
 MIN_MEMBER_COUNT = 2
 
