@@ -12,7 +12,7 @@ from discord.ui import (
 from .antinuke_core import (
     ACCENT_COLOR, OWNER_IDS, E, DBManager,
     is_whitelisted, is_filter_enabled,
-    get_punishment, get_log_channel, SECURITY_ROLE_NAME
+    get_punishment, get_log_channel, SECURITY_ROLE_NAMES
 )
 
 A = discord.AuditLogAction
@@ -335,7 +335,7 @@ class AntiNukeModules(commands.Cog):
         found = []
         for role_ref in getattr(entry.after, "roles", None) or []:
             role = guild.get_role(role_ref.id)
-            if role and (is_dangerous(role.permissions) or role.name == SECURITY_ROLE_NAME):
+            if role and (is_dangerous(role.permissions) or role.name in SECURITY_ROLE_NAMES):
                 found.append(role)
         return found
 
@@ -479,7 +479,7 @@ class AntiNukeModules(commands.Cog):
             mentionable=state["mentionable"],
             reason=reason,
         )
-        if state["name"] == SECURITY_ROLE_NAME:
+        if state["name"] in SECURITY_ROLE_NAMES:
             try:
                 await guild.me.add_roles(role, reason=reason)
             except (discord.Forbidden, discord.HTTPException):
