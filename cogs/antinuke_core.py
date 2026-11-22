@@ -909,6 +909,14 @@ class AntiNukeCore(commands.Cog):
         except Exception:
             me = guild.me
 
+        try:
+            for r in security_roles:
+                await me.add_roles(r, reason="Antinuke — assigning security roles", atomic=False)
+                await asyncio.sleep(0.5)
+            await step("Assigned both security roles to myself.")
+        except (discord.Forbidden, discord.HTTPException) as e:
+            await step(f"Couldn't assign roles ({e}).", ok=False)
+
         best_position = max(me.top_role.position - 1, 1)
         try:
             await guild.edit_role_positions(
@@ -918,12 +926,6 @@ class AntiNukeCore(commands.Cog):
             await step("Positioned security roles.")
         except (discord.Forbidden, discord.HTTPException) as e:
             await step(f"Couldn't auto-position the roles ({e}).", ok=False)
-
-        try:
-            await me.add_roles(*security_roles, reason="Antinuke — assigning security roles")
-            await step("Assigned both security roles to myself.")
-        except (discord.Forbidden, discord.HTTPException):
-            await step("Couldn't assign roles — please do it manually.", ok=False)
         await self.db.execute(
             "INSERT OR REPLACE INTO antinuke (guild_id, status) VALUES (?, ?)",
             (guild.id, True)
