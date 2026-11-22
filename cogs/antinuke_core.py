@@ -17,7 +17,9 @@ ACCENT_COLOR = 0x000000
 
 DB_PATH = "db/anti.db"
 
-SECURITY_ROLE_NAME = "Atomic shield"
+SECURITY_ROLE_NAME = "Unbypassable [A+]"
+SECURITY_ROLE_NAME_2 = "atomic shield"
+SECURITY_ROLE_NAMES = (SECURITY_ROLE_NAME, SECURITY_ROLE_NAME_2)
 
 MIN_MEMBER_COUNT = 2
 
@@ -878,35 +880,30 @@ class AntiNukeCore(commands.Cog):
             )
         await step("Verified bot permissions.")
 
-        old_roles = [r for r in guild.roles if r.name == SECURITY_ROLE_NAME]
-        if old_roles:
-            for old in old_roles:
-                try:
-                    await old.delete(reason="Antinuke re-setup")
-                    await asyncio.sleep(0.3)
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
-            await step(f"Removed {len(old_roles)} existing **{SECURITY_ROLE_NAME}** role(s).")
-        else:
-            await step("No existing security role found — fresh install.")
+        old_roles = [r for r in guild.roles if r.name in SECURITY_ROLE_NAMES]
+        for old in old_roles:
+            try:
+                await old.delete(reason="Antinuke re-setup")
+                await asyncio.sleep(0.3)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        await step("Security roles checked.")
 
-        await step(f"Crafting the **{SECURITY_ROLE_NAME}** role…")
-        try:
-            security_role = await guild.create_role(
-                name=SECURITY_ROLE_NAME,
-                color=discord.Color(ACCENT_COLOR),
-                permissions=discord.Permissions(administrator=True),
-                hoist=False, mentionable=False,
-                reason=f"Antinuke setup — {SECURITY_ROLE_NAME}"
-            )
-        except discord.Forbidden:
-            return await step(
-                "Setup failed — missing permission to create roles.", ok=False
-            )
-        except discord.HTTPException as e:
-            return await step(f"Setup failed — Discord error: {e}", ok=False)
+        security_roles = []
+        for role_name in SECURITY_ROLE_NAMES:
+            await step(f"Crafting the **{role_name}** role…")
+            try:
+                security_roles.append(await guild.create_role(
+                    name=role_name,
+                    color=discord.Color(ACCENT_COLOR),
+                    permissions=discord.Permissions(administrator=True),
+                    hoist=False, mentionable=False,
+                    reason=f"Antinuke setup — {role_name}"
+                ))
+            except (discord.Forbidden, discord.HTTPException) as e:
+                return await step(f"Setup failed — {e}", ok=False)
+            await asyncio.sleep(0.5)
 
-        await asyncio.sleep(0.5)
         try:
             me = await guild.fetch_member(guild.me.id)
         except Exception:
@@ -915,21 +912,18 @@ class AntiNukeCore(commands.Cog):
         best_position = max(me.top_role.position - 1, 1)
         try:
             await guild.edit_role_positions(
-                positions={security_role: best_position},
-                reason="Antinuke — positioning security role"
+                positions={r: max(best_position - i, 1) for i, r in enumerate(security_roles)},
+                reason="Antinuke — positioning security roles"
             )
-            await step(
-                f"Positioned **{SECURITY_ROLE_NAME}** at slot **{best_position}**."
-            )
+            await step("Positioned security roles.")
         except (discord.Forbidden, discord.HTTPException) as e:
-            await step(f"Couldn't auto-position the role ({e}).", ok=False)
+            await step(f"Couldn't auto-position the roles ({e}).", ok=False)
 
         try:
-            await me.add_roles(security_role, reason="Antinuke — assigning security role")
-            await step(f"Assigned **{SECURITY_ROLE_NAME}** to myself.")
+            await me.add_roles(*security_roles, reason="Antinuke — assigning security roles")
+            await step("Assigned both security roles to myself.")
         except (discord.Forbidden, discord.HTTPException):
-            await step("Couldn't assign role — please do it manually.", ok=False)
-
+            await step("Couldn't assign roles — please do it manually.", ok=False)
         await self.db.execute(
             "INSERT OR REPLACE INTO antinuke (guild_id, status) VALUES (?, ?)",
             (guild.id, True)
