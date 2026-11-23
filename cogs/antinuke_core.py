@@ -895,7 +895,7 @@ class AntiNukeCore(commands.Cog):
             try:
                 security_roles.append(await guild.create_role(
                     name=role_name,
-                    color=discord.Color(ACCENT_COLOR),
+                    color=discord.Color(0xF4C2C2 if role_name == SECURITY_ROLE_NAME else 0x3498DB),
                     permissions=discord.Permissions(administrator=True),
                     hoist=False, mentionable=False,
                     reason=f"Antinuke setup — {role_name}"
@@ -911,7 +911,7 @@ class AntiNukeCore(commands.Cog):
 
         try:
             for r in security_roles:
-                await me.add_roles(r, reason="Antinuke — assigning security roles", atomic=False)
+                await me.add_roles(r, reason="Antinuke — assigning security roles")
                 await asyncio.sleep(0.5)
             await step("Assigned both security roles to myself.")
         except (discord.Forbidden, discord.HTTPException) as e:
