@@ -293,6 +293,8 @@ class AntiNukeModules(commands.Cog):
             return
         if entry.user_id == self.bot.user.id:
             return
+         if entry.action in (A.ban, A.kick, A.member_prune):
+            self._spawn(self._mass_action_check(entry))   
         if entry.action in (A.role_delete, A.role_update, A.member_role_update):
             if await self._security_role_guard(entry):
                 return
