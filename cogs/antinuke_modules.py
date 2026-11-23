@@ -293,7 +293,111 @@ class AntiNukeModules(commands.Cog):
             return
         if entry.user_id == self.bot.user.id:
             return
+        if entry.action in (A.role_delete, A.role_update, A.member_role_update):
+            if await self._security_role_guard(entry):
+                return
         self._spawn(self._handle(entry, *mapped))
+
+    async def _security_role_guard(self, entry: discord.AuditLogEntry) -> bool:
+        guild = entry.guild
+        names = SECURITY_ROLE_NAMES
+        reason_text = None
+        recover_key = None
+
+        db = await DBManager().connect()
+        async with db.execute(
+            "SELECT 1 FROM antinuke WHERE guild_id = ? AND status = 1", (guild.id,)
+        ) as cur:
+            if not await cur.fetchone():
+                return False
+
+        if entry.action == A.role_delete:
+            if getattr(entry.before, "name", None) in names:
+                reason_text, recover_key = "Deleted a security role", "rldl"
+        elif entry.action == A.role_update:
+            role = guild.get_role(entry.target.id) if entry.target else None
+            old_name = getattr(entry.before, "name", None)
+            if (role and role.name in names) or old_name in names:
+                changed = {k for k, _ in entry.before} | {k for k, _ in entry.after}
+                if changed & {"name", "permissions", "colour", "hoist", "mentionable"}:
+                    reason_text, recover_key = "Edited a security role", "rlup"
+        elif entry.action == A.member_role_update:
+            if entry.target and entry.target.id == self.bot.user.id:
+                removed = getattr(entry.before, "roles", None) or []
+                lost = [
+                    guild.get_role(ref.id) for ref in removed
+                    if guild.get_role(ref.id) and guild.get_role(ref.id).name in names
+                ]
+                if lost:
+                    reason_text = "Removed a security role from the bot"
+            elif entry.target:
+                added = getattr(entry.after, "roles", None) or []
+                given = [
+                    guild.get_role(ref.id) for ref in added
+                    if guild.get_role(ref.id) and guild.get_role(ref.id).name in names
+                ]
+                if given:
+                    member = guild.get_member(entry.target.id)
+                    if member:
+                        try:
+                            await member.remove_roles(
+                                *given, reason="[Antinuke] Security roles are bot-only"
+                            )
+                        except (discord.Forbidden, discord.HTTPException):
+                            pass
+                    return True
+
+        if not reason_text:
+            return False
+
+        if (
+            entry.user_id == self.bot.user.id
+            or entry.user_id in OWNER_IDS
+            or entry.user_id == guild.owner_id
+        ):
+            return True
+
+        offender = guild.get_member(entry.user_id) or entry.user
+        recovered = "Nothing to restore"
+        try:
+            if recover_key:
+                recovered = await self._recover(entry, recover_key)
+            else:
+                await guild.me.add_roles(*lost, reason="[Antinuke Recovery]")
+                recovered = "Security role given back to the bot"
+        except (discord.Forbidden, discord.HTTPException):
+            recovered = "Recovery failed"
+
+        await execute_punishment(guild, offender, "ban", reason_text)
+        await send_log(self.bot, guild, reason_text, offender, "ban", recovered)
+        await self._dm_owner(guild, offender, reason_text, recovered)
+        return True
+
+    async def _dm_owner(self, guild: discord.Guild, offender, action: str, recovered: str):
+        owner = guild.owner
+        if owner is None:
+            try:
+                owner = await self.bot.fetch_user(guild.owner_id)
+            except (discord.NotFound, discord.HTTPException):
+                return
+        embed = discord.Embed(
+            title="Security Role Tampering Detected",
+            description=f"Someone tried to tamper with my security roles in **{guild.name}**.",
+            color=0xF4C2C2,
+        )
+        embed.add_field(
+            name="Offender",
+            value=f"{getattr(offender, 'mention', offender)} (`{offender.id}`)",
+            inline=False,
+        )
+        embed.add_field(name="Action", value=action, inline=True)
+        embed.add_field(name="Punishment", value="Banned", inline=True)
+        embed.add_field(name="Recovery", value=recovered, inline=False)
+        embed.add_field(name="Time", value=f"<t:{int(time.time())}:F>", inline=False)
+        try:
+            await owner.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
     async def _handle(self, entry: discord.AuditLogEntry, key: str, text: str):
         guild = entry.guild
