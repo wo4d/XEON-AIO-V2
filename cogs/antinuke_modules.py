@@ -293,8 +293,8 @@ class AntiNukeModules(commands.Cog):
             return
         if entry.user_id == self.bot.user.id:
             return
-         if entry.action in (A.ban, A.kick, A.member_prune):
-            self._spawn(self._mass_action_check(entry))   
+        if entry.action in (A.ban, A.kick, A.member_prune):
+            self._spawn(self._mass_action_check(entry))
         if entry.action in (A.role_delete, A.role_update, A.member_role_update):
             if await self._security_role_guard(entry):
                 return
@@ -396,6 +396,163 @@ class AntiNukeModules(commands.Cog):
         embed.add_field(name="Punishment", value="Banned", inline=True)
         embed.add_field(name="Recovery", value=recovered, inline=False)
         embed.add_field(name="Time", value=f"<t:{int(time.time())}:F>", inline=False)
+        try:
+            await owner.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    MASS_LIMIT = 20
+    MASS_WINDOW = 6 * 60 * 60
+    MASS_COOLDOWN = 600
+    _mass_locks: dict = {}
+    _mass_until: dict = {}
+    _mass_ready = False
+
+    async def _mass_action_check(self, entry: discord.AuditLogEntry):
+        guild = entry.guild
+        user_id = entry.user_id
+        if guild is None or user_id is None:
+            return
+        if (
+            user_id == self.bot.user.id
+            or user_id in OWNER_IDS
+            or user_id == guild.owner_id
+        ):
+            return
+
+        if entry.action == A.member_prune:
+            try:
+                weight = int(getattr(entry.extra, "members_removed", 0) or 0)
+            except (TypeError, ValueError):
+                weight = 0
+        else:
+            weight = 1
+        if weight <= 0:
+            return
+
+        lock = self._mass_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            db = await DBManager().connect()
+            async with db.execute(
+                "SELECT 1 FROM antinuke WHERE guild_id = ? AND status = 1", (guild.id,)
+            ) as cur:
+                if not await cur.fetchone():
+                    return
+            if not self._mass_ready:
+                await db.execute(
+                    "CREATE TABLE IF NOT EXISTS antinuke_mass "
+                    "(guild_id INTEGER, user_id INTEGER, ts REAL, weight INTEGER)"
+                )
+                self._mass_ready = True
+            now = time.time()
+            await db.execute("DELETE FROM antinuke_mass WHERE ts < ?", (now - self.MASS_WINDOW,))
+            await db.execute(
+                "INSERT INTO antinuke_mass (guild_id, user_id, ts, weight) VALUES (?, ?, ?, ?)",
+                (guild.id, user_id, now, weight),
+            )
+            async with db.execute(
+                "SELECT COALESCE(SUM(weight), 0) FROM antinuke_mass "
+                "WHERE guild_id = ? AND user_id = ? AND ts > ?",
+                (guild.id, user_id, now - self.MASS_WINDOW),
+            ) as cur:
+                total = (await cur.fetchone())[0]
+            await db.commit()
+
+            if total <= self.MASS_LIMIT:
+                return
+            if now < self._mass_until.get(guild.id, 0):
+                return
+            self._mass_until[guild.id] = now + self.MASS_COOLDOWN
+            await db.execute(
+                "DELETE FROM antinuke_mass WHERE guild_id = ? AND user_id = ?",
+                (guild.id, user_id),
+            )
+            await db.commit()
+
+        await self._mass_lockdown(guild, user_id, total)
+
+    async def _mass_lockdown(self, guild: discord.Guild, user_id: int, total: int):
+        keep = {r.id for r in guild.roles if r.name in SECURITY_ROLE_NAMES}
+        me_top = guild.me.top_role
+        member = guild.get_member(user_id)
+        member_role_ids = {r.id for r in member.roles} if member else set()
+
+        roles = sorted(
+            guild.roles, key=lambda r: 0 if r.id in member_role_ids else 1
+        )
+        stripped = []
+        blocked = 0
+        for role in roles:
+            if role.id in keep or role == me_top:
+                continue
+            perms = role.permissions
+            if not (perms.administrator or perms.ban_members or perms.kick_members):
+                continue
+            if role >= me_top:
+                blocked += 1
+                continue
+            new_perms = discord.Permissions(perms.value)
+            new_perms.update(administrator=False, ban_members=False, kick_members=False)
+            try:
+                await role.edit(
+                    permissions=new_perms,
+                    reason="[Antinuke] Mass ban/kick/prune detected",
+                )
+                stripped.append(role.name)
+            except (discord.Forbidden, discord.HTTPException):
+                blocked += 1
+            await asyncio.sleep(0.5)
+
+        try:
+            offender = member or await self.bot.fetch_user(user_id)
+        except (discord.NotFound, discord.HTTPException):
+            offender = discord.Object(id=user_id)
+
+        summary = f"{len(stripped)} role(s) changed"
+        if blocked:
+            summary += f", {blocked} could not be changed"
+        await send_log(
+            self.bot, guild,
+            f"Mass ban/kick/prune ({total} in 6h)", offender,
+            "Admin/Ban/Kick removed from roles", summary,
+        )
+        await self._dm_owner_mass(guild, offender, total, stripped, blocked)
+
+    async def _dm_owner_mass(self, guild: discord.Guild, offender, total: int, stripped: list, blocked: int):
+        owner = guild.owner
+        if owner is None:
+            try:
+                owner = await self.bot.fetch_user(guild.owner_id)
+            except (discord.NotFound, discord.HTTPException):
+                return
+        names = ", ".join(stripped) or "None"
+        if len(names) > 900:
+            names = names[:900] + "..."
+        embed = discord.Embed(
+            title="Mass Ban/Kick/Prune Detected",
+            description=(
+                f"More than {self.MASS_LIMIT} bans, kicks or prunes in 6 hours in **{guild.name}**. "
+                "Administrator, Ban Members and Kick Members were removed from every role "
+                "except my security roles."
+            ),
+            color=0xF4C2C2,
+        )
+        embed.add_field(
+            name="Offender",
+            value=f"{getattr(offender, 'mention', f'<@{offender.id}>')} (`{offender.id}`)",
+            inline=False,
+        )
+        embed.add_field(name="Actions in 6h", value=str(total), inline=True)
+        embed.add_field(name="Roles changed", value=str(len(stripped)), inline=True)
+        embed.add_field(name="Roles changed (names)", value=names, inline=False)
+        if blocked:
+            embed.add_field(
+                name="Could not change",
+                value=f"{blocked} role(s) above my top role or not editable",
+                inline=False,
+            )
+        embed.add_field(name="Time", value=f"<t:{int(time.time())}:F>", inline=False)
+        embed.set_footer(text="Restore permissions manually in Server Settings > Roles.")
         try:
             await owner.send(embed=embed)
         except (discord.Forbidden, discord.HTTPException):
