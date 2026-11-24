@@ -268,6 +268,7 @@ CATEGORIES = {
         "title": "logging",
         "aliases": ["log"],
         "commands": [
+            ("log all",           "Auto-create & configure every log channel."),
             ("log setup",         "Set default log channel for all events."),
             ("log set",           "Override per-type log channel."),
             ("log enable",        "Enable a log event type."),
