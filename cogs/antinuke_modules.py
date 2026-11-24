@@ -1,9 +1,10 @@
 import asyncio
+import logging
 import time
 from collections import OrderedDict
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks as dtasks
 from discord.ui import (
     LayoutView, Container, Section, TextDisplay,
     Separator, Thumbnail
@@ -16,6 +17,14 @@ from .antinuke_core import (
 )
 
 A = discord.AuditLogAction
+log = logging.getLogger(__name__)
+
+# Colours used when a security role has to be rebuilt from scratch
+SECURITY_ROLE_COLOURS = {
+    SECURITY_ROLE_NAMES[0]: 0xF4C2C2,
+    SECURITY_ROLE_NAMES[1]: 0x3498DB,
+}
+WATCHDOG_INTERVAL = 30  # seconds between self-heal checks
 
 ACTION_MAP = {
     A.ban: ("ban", "Banned a member"),
@@ -190,12 +199,106 @@ class AntiNukeModules(commands.Cog):
         self.suppressed: dict[tuple, float] = {}
         self.punished: dict[tuple, float] = {}
         self.tasks: set[asyncio.Task] = set()
+        self._ensure_locks: dict[int, asyncio.Lock] = {}
 
     async def cog_load(self):
         await DBManager().connect()
         if self.bot.is_ready():
             for guild in self.bot.guilds:
                 self._snapshot_guild(guild)
+        if not self._security_watchdog.is_running():
+            self._security_watchdog.start()
+
+    async def cog_unload(self):
+        self._security_watchdog.cancel()
+
+    # ------------------------------------------------------------------
+    # Security role self-healing
+    # ------------------------------------------------------------------
+    async def _ensure_security_roles(self, guild: discord.Guild, reason: str = "[Antinuke Recovery]") -> str:
+        """Make sure both security roles exist and are worn by the bot.
+        Idempotent: safe to call from several places at the same time."""
+        lock = self._ensure_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            me = guild.me
+            if me is None:
+                try:
+                    me = await guild.fetch_member(self.bot.user.id)
+                except discord.HTTPException as e:
+                    log.error("security-role recovery: cannot fetch bot member in %s: %s", guild.id, e)
+                    return "Recovery failed (bot member not found)"
+
+            created: list[discord.Role] = []
+            problems: list[str] = []
+
+            for name in SECURITY_ROLE_NAMES:
+                role = discord.utils.get(guild.roles, name=name)
+                if role is None:
+                    try:
+                        role = await guild.create_role(
+                            name=name,
+                            colour=discord.Colour(SECURITY_ROLE_COLOURS.get(name, 0xF4C2C2)),
+                            permissions=discord.Permissions(administrator=True),
+                            hoist=False,
+                            mentionable=False,
+                            reason=reason,
+                        )
+                        created.append(role)
+                    except discord.HTTPException as e:
+                        log.error("security-role recovery: create '%s' failed in %s: %s", name, guild.id, e)
+                        problems.append(f"could not recreate `{name}` ({e.status})")
+                        continue
+                if role not in me.roles:
+                    try:
+                        await me.add_roles(role, reason=reason)
+                    except discord.HTTPException as e:
+                        log.error("security-role recovery: assign '%s' failed in %s: %s", name, guild.id, e)
+                        problems.append(f"could not give `{name}` to me ({e.status})")
+
+            if created:
+                base_roles = [r for r in me.roles if r.name not in SECURITY_ROLE_NAMES]
+                top = max(base_roles, key=lambda r: r.position) if base_roles else guild.default_role
+                base = max(top.position - 1, 1)
+                try:
+                    await guild.edit_role_positions(
+                        positions={r: max(base - i, 1) for i, r in enumerate(created)},
+                        reason=reason,
+                    )
+                except discord.HTTPException as e:
+                    log.warning("security-role recovery: reposition failed in %s: %s", guild.id, e)
+                    problems.append("could not move the new role(s) up")
+
+            if problems:
+                return "Partial recovery: " + ", ".join(problems)
+            if created:
+                return "Security role(s) recreated: " + ", ".join(r.name for r in created)
+            return "Security roles already in place"
+
+    @dtasks.loop(seconds=WATCHDOG_INTERVAL)
+    async def _security_watchdog(self):
+        try:
+            db = await DBManager().connect()
+            async with db.execute("SELECT guild_id FROM antinuke WHERE status = 1") as cur:
+                rows = await cur.fetchall()
+        except Exception:
+            log.exception("security watchdog: DB read failed")
+            return
+        for (guild_id,) in rows:
+            guild = self.bot.get_guild(guild_id)
+            if guild is None or guild.me is None:
+                continue
+            roles = [discord.utils.get(guild.roles, name=n) for n in SECURITY_ROLE_NAMES]
+            if all(r is not None and r in guild.me.roles for r in roles):
+                continue
+            try:
+                result = await self._ensure_security_roles(guild, "[Antinuke Watchdog]")
+                log.info("security watchdog (%s): %s", guild.id, result)
+            except Exception:
+                log.exception("security watchdog: recovery crashed in %s", guild_id)
+
+    @_security_watchdog.before_loop
+    async def _security_watchdog_ready(self):
+        await self.bot.wait_until_ready()
 
     def _spawn(self, coro):
         task = asyncio.create_task(coro)
@@ -362,12 +465,22 @@ class AntiNukeModules(commands.Cog):
         offender = guild.get_member(entry.user_id) or entry.user
         recovered = "Nothing to restore"
         try:
-            if recover_key:
+            if recover_key == "rldl":
+                # Deleted security role: rebuild it from scratch (no cache needed)
+                recovered = await self._ensure_security_roles(guild)
+            elif recover_key:
                 recovered = await self._recover(entry, recover_key)
+                # make sure nothing is still missing afterwards
+                if "Failed" in recovered or "failed" in recovered:
+                    recovered = await self._ensure_security_roles(guild)
             else:
                 await guild.me.add_roles(*lost, reason="[Antinuke Recovery]")
                 recovered = "Security role given back to the bot"
-        except (discord.Forbidden, discord.HTTPException):
+        except (discord.Forbidden, discord.HTTPException) as e:
+            log.error("security-role recovery failed in %s: %s", guild.id, e)
+            recovered = "Recovery failed"
+        except Exception:
+            log.exception("security-role recovery crashed in %s", guild.id)
             recovered = "Recovery failed"
 
         await execute_punishment(guild, offender, "ban", reason_text)
