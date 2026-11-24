@@ -49,6 +49,27 @@ LOG_TYPES = [
     "voice", "invite",
 ]
 
+LOG_CATEGORY_NAME = "📋 Server Logs"
+
+LOG_CHANNEL_NAMES = {
+    "message_delete":  "message-delete-logs",
+    "message_edit":    "message-edit-logs",
+    "bulk_delete":     "bulk-delete-logs",
+    "member_join":     "member-join-logs",
+    "member_leave":    "member-leave-logs",
+    "member_update":   "member-update-logs",
+    "member_ban":      "member-ban-logs",
+    "member_unban":    "member-unban-logs",
+    "role_create":     "role-create-logs",
+    "role_delete":     "role-delete-logs",
+    "role_update":     "role-update-logs",
+    "channel_create":  "channel-create-logs",
+    "channel_delete":  "channel-delete-logs",
+    "channel_update":  "channel-update-logs",
+    "voice":           "voice-logs",
+    "invite":          "invite-logs",
+}
+
 
 async def init_db():
     DB_DIR.mkdir(exist_ok=True)
@@ -151,6 +172,7 @@ class Logging(commands.Cog):
         c.add_item(ui.TextDisplay(f"### {ES('settings')} Logging Commands"))
         c.add_item(ui.Separator())
         c.add_item(ui.TextDisplay(
+            f"`{ctx.prefix}log all` — Auto-create ALL log channels & set everything up\n"
             f"`{ctx.prefix}log setup #ch` — Set default log channel (all events)\n"
             f"`{ctx.prefix}log set <type> #ch` — Override per-type channel\n"
             f"`{ctx.prefix}log enable <type>` — Enable a log type\n"
@@ -160,6 +182,88 @@ class Logging(commands.Cog):
             f"`{ctx.prefix}log reset` — Reset all logging settings"
         ))
         v.add_item(c); await ctx.send(view=v)
+
+    @logging.command(name="all", aliases=["enableall", "setupall", "auto", "enable_all"])
+    @commands.has_permissions(administrator=True)
+    @commands.bot_has_permissions(manage_channels=True)
+    @commands.cooldown(1, 30, commands.BucketType.guild)
+    async def log_all(self, ctx):
+        """Auto-create a channel for every log type and configure it."""
+        guild = ctx.guild
+        wait = await ctx.send(view=_ok("Setting up all logging channels, please wait..."))
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, embed_links=True,
+                read_message_history=True,
+            ),
+        }
+
+        category = discord.utils.get(guild.categories, name=LOG_CATEGORY_NAME)
+        try:
+            if category is None:
+                category = await guild.create_category(
+                    LOG_CATEGORY_NAME, overwrites=overwrites,
+                    reason=f"Logging auto-setup by {ctx.author}",
+                )
+        except discord.Forbidden:
+            await ctx.send(view=_err("I don't have permission to create channels."))
+            return
+        except discord.HTTPException as e:
+            await ctx.send(view=_err(f"Failed to create category: `{e}`"))
+            return
+
+        created, reused, failed = [], [], []
+        async with aiosqlite.connect(str(DB_PATH)) as db:
+            for log_type in LOG_TYPES:
+                name = LOG_CHANNEL_NAMES.get(log_type, f"{log_type.replace('_', '-')}-logs")
+                channel = discord.utils.get(category.text_channels, name=name)
+                try:
+                    if channel is None:
+                        channel = await guild.create_text_channel(
+                            name, category=category, overwrites=overwrites,
+                            reason=f"Logging auto-setup by {ctx.author}",
+                        )
+                        created.append(channel)
+                    else:
+                        reused.append(channel)
+                    await db.execute(
+                        "INSERT OR REPLACE INTO log_config (guild_id, log_type, channel_id, enabled) "
+                        "VALUES (?,?,?,1)",
+                        (guild.id, log_type, channel.id),
+                    )
+                except Exception:
+                    failed.append(log_type)
+            await db.commit()
+
+        try:
+            await wait.delete()
+        except Exception:
+            pass
+
+        v = ui.LayoutView(); c = ui.Container(accent_color=DEFAULT_ACCENT)
+        c.add_item(ui.TextDisplay(f"### {ES('success')} All Logging Enabled"))
+        c.add_item(ui.Separator())
+        lines = [f"{ES('dot')} **Category:** {category.mention}"]
+        lines.append(f"{ES('dot')} **Created:** `{len(created)}` channels")
+        if reused:
+            lines.append(f"{ES('dot')} **Already existed (reused):** `{len(reused)}`")
+        if failed:
+            lines.append(f"{ES('error')} **Failed:** {', '.join(f'`{t}`' for t in failed)}")
+        c.add_item(ui.TextDisplay("\n".join(lines)))
+        c.add_item(ui.Separator())
+        all_ch = created + reused
+        c.add_item(ui.TextDisplay(
+            "\n".join(f"{ES('dot')} {ch.mention}" for ch in all_ch)[:3500] or "No channels."
+        ))
+        c.add_item(ui.Separator(visible=False))
+        c.add_item(ui.TextDisplay(
+            f"Channels are private (only admins & the bot can see them).\n"
+            f"Use `{ctx.prefix}log disable <type>` to turn off one log, or `{ctx.prefix}log config` to review."
+        ))
+        v.add_item(c)
+        await ctx.send(view=v)
 
     @logging.command(name="setup")
     @commands.has_permissions(administrator=True)
